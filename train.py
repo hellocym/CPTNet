@@ -7,7 +7,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from torch.utils.tensorboard import SummaryWriter
-from models import StarGANDiscriminator, CPTNet, initialize_weights
+from models import StarGANDiscriminator, CPTNet, LossNetwork, initialize_weights
 
 
 # Hyperparameters etc.
@@ -18,6 +18,8 @@ INIT_LEARNING_RATE = 1e-4
 BATCH_SIZE = 8
 NUM_STEPS = 600000
 IMAGE_SIZE = 256
+LAMBDA_1 = 1000
+LAMBDA_2 = 200
 
 # Load Data
 transform = transforms.Compose(
@@ -50,3 +52,99 @@ lr_scheduler_G = optim.lr_scheduler.LambdaLR(
 lr_scheduler_D = optim.lr_scheduler.LambdaLR(
     optim_D, lr_lambda=lambda step: 1.0 - max(0, step - 500000) / 100000
 )
+
+# Loss function
+criterion = nn.BCELoss()
+
+# Tensorboard
+writer_real = SummaryWriter(f"logs/real")
+writer_fake = SummaryWriter(f"logs/fake")
+
+# Labels
+real_label = 1
+fake_label = 0
+
+# Training Loop
+step = 0
+for epoch in range(NUM_STEPS):
+    for batch_idx, (real, pose) in enumerate(dataloader):
+        real = real.to(device)
+        pose = pose.to(device)
+        fake = G(real, pose)
+
+        # calc adversarial loss
+        # L_adv = E[log(D(real))] + E[log(1 - D(G(real, pose)))]
+        real_loss = criterion(D(real), torch.ones_like(D(real)))
+        fake_loss = criterion(D(fake.detach()), torch.zeros_like(D(fake)))
+        loss_adv = (real_loss + fake_loss) / 2
+
+        # calc content loss
+        # L_pair = E[||G(real, pose) - real||], where ||.|| is L1 norm
+        loss_pair = torch.mean(torch.abs(fake - real))
+
+        # calc perceptual loss
+        # Only a L1Loss constraint on the generated image and ground truth may cause the image to be blurred.
+        # So we adopt the perceptual loss [26] as another constraint.
+        # We let the generated image and its corresponding ground truth pass through the pre-trained VGG19 network [27],
+        # and extract the features of conv1 1, conv2 1, conv3 1, and conv4 2 layers for L1Loss, and finally weighted summation.
+        # L_p = sum_j(E[||VGG_j(G(real, pose)) - VGG_j(real)||]), where ||.|| is L1 norm, and VGG_j is the j-th layer of VGG19
+        loss_p = 0
+        VGG = torchvision.models.vgg19(pretrained=True).features
+        VGG = VGG.to(device)
+        loss_network = LossNetwork(VGG)
+        loss_network.eval()
+        conv_1_1 = nn.L1Loss()(loss_network(fake)['conv1_1'], loss_network(real)['conv1_1'])
+        conv_2_1 = nn.L1Loss()(loss_network(fake)['conv2_1'], loss_network(real)['conv2_1'])
+        conv_3_1 = nn.L1Loss()(loss_network(fake)['conv3_1'], loss_network(real)['conv3_1'])
+        conv_4_2 = nn.L1Loss()(loss_network(fake)['conv4_2'], loss_network(real)['conv4_2'])
+        loss_p = conv_1_1 + conv_2_1 + conv_3_1 + conv_4_2
+            
+        # calc full loss
+        # L_full = L_adv + lambda_1 * L_pair + lambda_2 * L_p
+        loss_full = loss_adv + LAMBDA_1 * loss_pair + LAMBDA_2 * loss_p
+
+        # optimize D
+        optim_D.zero_grad()
+        loss_full.backward()
+        optim_D.step()
+
+        # optimize G
+        optim_G.zero_grad()
+        loss_full.backward()
+        optim_G.step()
+
+        # print losses
+        if batch_idx % 100 == 0:
+            print(
+                f"Epoch [{epoch}/{NUM_STEPS}] Batch {batch_idx}/{len(dataloader)} \
+                  Loss D: {loss_full:.4f}, loss G: {loss_full:.4f}"
+            )
+
+            with torch.no_grad():
+                fake = G(real, pose)
+                img_grid_real = torchvision.utils.make_grid(real[:4], normalize=True)
+                img_grid_fake = torchvision.utils.make_grid(fake[:4], normalize=True)
+                writer_real.add_image("Real", img_grid_real, global_step=step)
+                writer_fake.add_image("Fake", img_grid_fake, global_step=step)
+
+            step += 1
+
+    # update learning rates
+    lr_scheduler_G.step()
+    lr_scheduler_D.step()
+
+    # save models
+    if epoch % 100 == 0:
+        torch.save(G.state_dict(), f"saved_models/G_{epoch}.pth")
+        torch.save(D.state_dict(), f"saved_models/D_{epoch}.pth")
+
+# save final model
+torch.save(G.state_dict(), f"saved_models/G_final.pth")
+torch.save(D.state_dict(), f"saved_models/D_final.pth")
+
+# close tensorboard writer
+writer_real.close()
+writer_fake.close()
+
+
+           

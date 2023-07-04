@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from collections import namedtuple
 
 
 class ExpressionGenerator(nn.Module):
@@ -372,6 +373,31 @@ class StarGANDiscriminator(nn.Module):
         x = self.output(x)
         return x
     
+
+class LossNetwork(nn.Module):
+    def __init__(self, vgg_model):
+        super(LossNetwork, self).__init__()
+        self.vgg_layers = vgg_model.features
+        # extract the features of conv1 1, conv2 1, conv3 1, and conv4 2
+        self.layer_name_mapping = {
+            '1': "relu1_1",
+            '6': "relu2_1",
+            '11': "relu3_1",
+            '22': "relu4_2"
+        }
+        self.LossOutput = namedtuple("LossOutput", ["relu1_1", "relu2_1", "relu3_1", "relu4_2"])
+
+    def forward(self, x):
+        """
+        x: N x 3 x H x W
+        """
+        output = {}
+        for name, module in self.vgg_layers._modules.items():
+            x = module(x)
+            if name in self.layer_name_mapping:
+                output[self.layer_name_mapping[name]] = x
+        return self.LossOutput(**output)
+
 
 def initialize_weights(model):
     """
