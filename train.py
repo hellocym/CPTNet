@@ -8,10 +8,12 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from torch.utils.tensorboard import SummaryWriter
 from models import StarGANDiscriminator, CPTNet, LossNetwork, initialize_weights
+from dataset import AnimeCeleb
 
 
 # Hyperparameters etc.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = 'cpu'
 print(f'Running on {device}')
 
 INIT_LEARNING_RATE = 1e-4
@@ -20,23 +22,24 @@ NUM_STEPS = 600000
 IMAGE_SIZE = 256
 LAMBDA_1 = 1000
 LAMBDA_2 = 200
+FEATURE_SIZE = 20
 
 # Load Data
 transform = transforms.Compose(
     [
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize(
-            [0.5, 0.5, 0.5],  # mean
-            [0.5, 0.5, 0.5],  # std
-        ),
+        # transforms.Normalize(
+        #     [0.5, 0.5, 0.5],  # mean
+        #     [0.5, 0.5, 0.5],  # std
+        # ),
     ]
 )
 
-# dataset = ImageFolder(root="data", transform=transform)
-# loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+dataset = AnimeCeleb(root='./data/S3/', csv_path='./data/data.csv', transform=transform)
+loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-G = CPTNet(IMAGE_SIZE, IMAGE_SIZE).to(device)
+G = CPTNet(IMAGE_SIZE, IMAGE_SIZE, FEATURE_SIZE).to(device)
 D = StarGANDiscriminator(IMAGE_SIZE, IMAGE_SIZE).to(device)
 initialize_weights(G)
 initialize_weights(D)
@@ -54,7 +57,7 @@ lr_scheduler_D = optim.lr_scheduler.LambdaLR(
 )
 
 # Loss function
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss()
 
 # Tensorboard
 writer_real = SummaryWriter(f"logs/real")
@@ -64,18 +67,23 @@ writer_fake = SummaryWriter(f"logs/fake")
 real_label = 1
 fake_label = 0
 
+
 # Training Loop
 step = 0
 for epoch in range(NUM_STEPS):
-    for batch_idx, (real, pose) in enumerate(dataloader):
+    for batch_idx, (x, pose, real) in enumerate(loader):
+        # print('mem allocated {:.3f}MB'.format(torch.cuda.memory_allocated()/1024**2))
+
+        # print(f'Batch {batch_idx}')
         real = real.to(device)
         pose = pose.to(device)
-        fake = G(real, pose)
+        x = x.to(device)
+        fake = G(x, pose)
 
         # calc adversarial loss
-        # L_adv = E[log(D(real))] + E[log(1 - D(G(real, pose)))]
-        real_loss = criterion(D(real), torch.ones_like(D(real)))
-        fake_loss = criterion(D(fake.detach()), torch.zeros_like(D(fake)))
+        # L_adv = E[log(D(G(real, pose)))] - E[log(D(real))] 
+        real_loss = criterion(D(real), torch.zeros_like(D(real)))
+        fake_loss = criterion(D(fake.detach()), torch.ones_like(D(fake)))
         loss_adv = (real_loss + fake_loss) / 2
 
         # calc content loss
@@ -89,37 +97,41 @@ for epoch in range(NUM_STEPS):
         # and extract the features of conv1 1, conv2 1, conv3 1, and conv4 2 layers for L1Loss, and finally weighted summation.
         # L_p = sum_j(E[||VGG_j(G(real, pose)) - VGG_j(real)||]), where ||.|| is L1 norm, and VGG_j is the j-th layer of VGG19
         loss_p = 0
-        VGG = torchvision.models.vgg19(pretrained=True).features
+        VGG = torchvision.models.vgg19(pretrained=True)
         VGG = VGG.to(device)
         loss_network = LossNetwork(VGG)
         loss_network.eval()
-        conv_1_1 = nn.L1Loss()(loss_network(fake)['conv1_1'], loss_network(real)['conv1_1'])
-        conv_2_1 = nn.L1Loss()(loss_network(fake)['conv2_1'], loss_network(real)['conv2_1'])
-        conv_3_1 = nn.L1Loss()(loss_network(fake)['conv3_1'], loss_network(real)['conv3_1'])
-        conv_4_2 = nn.L1Loss()(loss_network(fake)['conv4_2'], loss_network(real)['conv4_2'])
+        # print(loss_network(fake))
+        conv_1_1 = nn.L1Loss()(loss_network(fake)[0], loss_network(real)[0])
+        conv_2_1 = nn.L1Loss()(loss_network(fake)[1], loss_network(real)[1])
+        conv_3_1 = nn.L1Loss()(loss_network(fake)[2], loss_network(real)[2])
+        conv_4_2 = nn.L1Loss()(loss_network(fake)[3], loss_network(real)[3])
         loss_p = conv_1_1 + conv_2_1 + conv_3_1 + conv_4_2
             
         # calc full loss
         # L_full = L_adv + lambda_1 * L_pair + lambda_2 * L_p
-        loss_full = loss_adv + LAMBDA_1 * loss_pair + LAMBDA_2 * loss_p
-
-        # optimize D
-        optim_D.zero_grad()
-        loss_full.backward()
-        optim_D.step()
+        loss_full_G = loss_adv + LAMBDA_1 * loss_pair + LAMBDA_2 * loss_p
 
         # optimize G
         optim_G.zero_grad()
-        loss_full.backward()
+        loss_full_G.backward()
         optim_G.step()
 
-        # print losses
-        if batch_idx % 100 == 0:
-            print(
-                f"Epoch [{epoch}/{NUM_STEPS}] Batch {batch_idx}/{len(dataloader)} \
-                  Loss D: {loss_full:.4f}, loss G: {loss_full:.4f}"
-            )
+        real_loss = criterion(D(real), torch.ones_like(D(real)))
+        fake_loss = criterion(D(fake.detach()), torch.zeros_like(D(fake)))
+        loss_full_D = (real_loss + fake_loss) / 2
+        # optimize D
+        optim_D.zero_grad()
+        loss_full_D.backward()
+        optim_D.step()
 
+        # print losses
+        if batch_idx % 1 == 0:
+            print(
+                f"\rEpoch [{epoch}/{NUM_STEPS}] Batch {batch_idx}/{len(loader)} \
+                  Loss D: {loss_full_D:.4f}, loss G: {loss_full_G:.4f}", end=""
+            )
+        if batch_idx % 100 == 0:
             with torch.no_grad():
                 fake = G(real, pose)
                 img_grid_real = torchvision.utils.make_grid(real[:4], normalize=True)

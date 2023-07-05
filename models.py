@@ -46,8 +46,7 @@ class MaskGenerator(nn.Module):
             nn.Sigmoid()
         )
 
-        
-
+    
     def forward(self, x):
         x = self.shared(x)
         x = self.up1(x)
@@ -104,27 +103,31 @@ class Mask(nn.Module):
     This strategy makes the learning process easier as the network only needs to focus on the dynamic areas, the static areas can be obtained from the input directly.
     However, mask generator is prone to be blurred, and it cannot maintain the color of input image well if given a large-scale pose vector.
     """
-    def __init__(self, H, W, shared_layer):
+    def __init__(self, H, W, feature_size, shared_layer):
         super(Mask, self).__init__()
         self.W = W
         self.H = H
-        self.embed = nn.Embedding(6, W * H)
-        self.G = MaskGenerator(shared_layer, self.H, self.W)
+        self.fs = feature_size
+        self.embed = nn.Embedding(feature_size, W * H)
+        self.G = MaskGenerator(shared_layer, H, W)
 
     def forward(self, x, pose_vector):
         # x: N x 3 x H x W
-        # pose_vector: 1 x 6
-        pose_vector = pose_vector.repeat(x.shape[0], 1)
-        # pose_vector: N x 6
-        pose_vector = self.embed(pose_vector.long())
-        # pose_vector: N x 6 x (H x W)
-        # print(pose_vector)
-        pose_vector = pose_vector.view(x.shape[0], 6, self.H, self.W)
-        # pose_vector: N x 6 x H x W
+        # pose_vector: N x fs
+        # print(x.shape)
+        try:
+            pose_vector = self.embed(pose_vector.long())
+        except Exception as e:
+            print(pose_vector.long().max(), pose_vector.long().min())
+            print(pose_vector.max(), pose_vector.min())
         # print(pose_vector.shape)
-        
+        # pose_vector: N x fs x (H x W)
+        pose_vector = pose_vector.view(x.shape[0], self.fs, self.H, self.W)
+        # pose_vector: N x fs x H x W
+        # print(x)
+        # print(pose_vector)
         x = torch.cat((x, pose_vector), dim=1)
-        # x: N x 9 x H x W
+        # x: N x (fs + 3) x H x W
         A, C = self.G(x)
         # A: N x 1 x H x W
         # C: N x 3 x H x W
@@ -140,32 +143,33 @@ class Grid(nn.Module):
     The network only needs to generate a two-channel grid vectors to guide the sampling process from input image, rather than generating a complete RGB image,
     which significantly reduces the difficulty of learning process.
     """
-    def __init__(self, H, W, shared_layer):
+    def __init__(self, H, W, feature_size, shared_layer):
         super(Grid, self).__init__()
         self.W = W
         self.H = H
-        self.embed = nn.Embedding(6, W * H)
+        self.fs = feature_size
+        self.embed = nn.Embedding(feature_size, W * H)
         self.G = GridGenerator(shared_layer)
         self.BS = nn.functional.grid_sample
+
+
     def forward(self, x, pose_vector):
         # x: N x 3 x H x W
-        # pose_vector: 1 x 6
-        pose_vector = pose_vector.repeat(x.shape[0], 1)
-        # pose_vector: N x 6
+        # pose_vector: N x fs
         pose_vector = self.embed(pose_vector.long())
-        # pose_vector: N x 6 x (H x W)
-        # print(pose_vector)
-        pose_vector = pose_vector.view(x.shape[0], 6, self.H, self.W)
-        # pose_vector: N x 6 x H x W
+        # pose_vector: N x fs x (H x W)
+        # print(pose_vector.shape)
+        pose_vector = pose_vector.view(x.shape[0], self.fs, self.H, self.W)
+        # pose_vector: N x fs x H x W
         x = torch.cat((x, pose_vector), dim=1)
-        # x: N x 9 x H x W
+        # x: N x (fs + 3) x H x W
         grid = self.G(x)
         # grid: N x 2 x H x W
         # print(grid.shape)
         grid = grid.permute(0, 2, 3, 1)
         # grid: N x H x W x 2
         y = self.BS(x[:, :3, :, :], grid, mode='bilinear', padding_mode='zeros')
-        # y: N x 9 x H x W
+        # y: N x (fs + 3) x H x W
         return y[:, :3, :, :]
 
 
@@ -189,16 +193,16 @@ class HeadMovementGeneratorMask(nn.Module):
 
     def forward(self, x, pose_vector):
         # x: N x 3 x H x W
-        # pose_vector: 1 x 6
+        # pose_vector: 1 x fs
         for i in range(self.k):
             x = self.Mask(x, (i+1) * pose_vector / self.k)
         return x
     
 
 class HeadMovementGeneratorGrid(nn.Module):
-    def __init__(self, H, W, shared_layer):
+    def __init__(self, H, W, feature_size, shared_layer):
         super(HeadMovementGeneratorGrid, self).__init__()
-        self.grid = Grid(H, W, shared_layer)
+        self.grid = Grid(H, W, feature_size, shared_layer)
         
 
     def forward(self, x, pose_vector):
@@ -256,7 +260,6 @@ class Fusion(nn.Module):
 
     def forward(self, x_mask, x_grid):
         # (N x 3 x H x W , N x 3 x H x W)
-        # print(x_mask.shape, x_grid.shape)
         x = torch.cat((x_mask, x_grid), 1)
         # x: N x 6 x H x W
         A = self.G(x)
@@ -292,12 +295,12 @@ class CPTNet(nn.Module):
     on one hand, the mask generator generates a single channel mask A and an RGB content image C.Then mask A linearly combines the source image and the content C to obtain the output.
     On the other hand, the grid generator generates a grid to get the output via bilinear sampling.
     """
-    def __init__(self, H, W):
+    def __init__(self, H, W, feature_size):
         super(CPTNet, self).__init__()
         self.shared_layer = nn.Sequential(
             # Down-sampling
-            # N x 9 x H x W
-            nn.Conv2d(9, 64, kernel_size=7, stride=1, padding=3),
+            # N x (fs + 3) x H x W
+            nn.Conv2d(feature_size + 3, 64, kernel_size=7, stride=1, padding=3),
             nn.InstanceNorm2d(64),
             nn.ReLU(inplace=True),
             # N x 64 x H x W
@@ -318,10 +321,10 @@ class CPTNet(nn.Module):
             ResBlock(256, 256, 256),
             ResBlock(256, 256, 256),
         )
-        self.Mask = Mask(H, W, self.shared_layer)  # Weight of the Mask model is shared
+        self.Mask = Mask(H, W, feature_size, self.shared_layer)  # Weight of the Mask model is shared
         self.EG = ExpressionGenerator(mask_layer=self.Mask)
         self.HMGM = HeadMovementGeneratorMask(mask_layer=self.Mask)
-        self.HMGG = HeadMovementGeneratorGrid(H, W, self.shared_layer)
+        self.HMGG = HeadMovementGeneratorGrid(H, W, feature_size, self.shared_layer)
         self.Comb = Fusion()
         
 
