@@ -6,3 +6,5 @@ log/
 data/
 *.csv
 *.zip
+expression/
+rotation/

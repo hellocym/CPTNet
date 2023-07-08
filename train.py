@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from torch.utils.tensorboard import SummaryWriter
 from models import StarGANDiscriminator, CPTNet, LossNetwork, initialize_weights
-from dataset import AnimeCeleb
+from dataset import AnimeCeleb, AnimeCelebIter
+from utils import GANLoss
 
 
 # Hyperparameters etc.
@@ -36,8 +37,11 @@ transform = transforms.Compose(
     ]
 )
 
-dataset = AnimeCeleb(root='./data/S3/', csv_path='./data/data.csv', transform=transform)
-loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+# dataset = AnimeCeleb(exp_path='./expression/', rot_path='./rotation/', csv_path='./data/data.csv', transform=transform)
+dataset = AnimeCelebIter(exp_path='./expression/', rot_path='./rotation/', csv_path='./data/data.csv', transform=transform)
+# loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+loader = DataLoader(dataset, batch_size=BATCH_SIZE, drop_last=True)
+# print(len(loader))
 
 G = CPTNet(IMAGE_SIZE, IMAGE_SIZE, FEATURE_SIZE).to(device)
 D = StarGANDiscriminator(IMAGE_SIZE, IMAGE_SIZE).to(device)
@@ -57,39 +61,41 @@ lr_scheduler_D = optim.lr_scheduler.LambdaLR(
 )
 
 # Loss function
-criterion = nn.BCEWithLogitsLoss()
+criterion = GANLoss('vanilla').to(device)
 
 # Tensorboard
 writer_real = SummaryWriter(f"logs/real")
 writer_fake = SummaryWriter(f"logs/fake")
-
-# Labels
-real_label = 1
-fake_label = 0
+writer_fake_exp = SummaryWriter(f"logs/fake_exp")
+writer_D = SummaryWriter(f"logs/D")
+writer_G = SummaryWriter(f"logs/G")
 
 
 # Training Loop
 step = 0
-for epoch in range(NUM_STEPS):
-    for batch_idx, (x, pose, real) in enumerate(loader):
-        # print('mem allocated {:.3f}MB'.format(torch.cuda.memory_allocated()/1024**2))
-
-        # print(f'Batch {batch_idx}')
+for epoch in range(NUM_STEPS//BATCH_SIZE):
+    for batch_idx, (x, pose, real, real_exp) in enumerate(loader):
+        # if x is None:
+            # continue
+        # print(f'\rbatch:{batch_idx}', end='')
+        # pass
         real = real.to(device)
+        real_exp = real_exp.to(device)
         pose = pose.to(device)
         x = x.to(device)
-        fake = G(x, pose)
+        fake_exp, fake = G(x, pose)
 
         # calc adversarial loss
         # L_adv = E[log(D(G(real, pose)))] - E[log(D(real))] 
-        real_loss = criterion(D(real), torch.zeros_like(D(real)))
-        fake_loss = criterion(D(fake.detach()), torch.ones_like(D(fake)))
-        loss_adv = (real_loss + fake_loss) / 2
-
+        # real_loss = criterion(D(real), torch.zeros_like(D(real)))
+        # fake_loss = criterion(D(fake.detach()), torch.ones_like(D(fake)))
+        # loss_adv = (real_loss + fake_loss) / 2
+        loss_adv = criterion(D(fake.detach()), True)
         # calc content loss
         # L_pair = E[||G(real, pose) - real||], where ||.|| is L1 norm
-        loss_pair = torch.mean(torch.abs(fake - real))
-
+        loss_pair_ = nn.L1Loss()(fake, real)
+        loss_pair_exp = nn.L1Loss()(fake_exp, real_exp)
+        loss_pair = (loss_pair_ + loss_pair_exp) / 2
         # calc perceptual loss
         # Only a L1Loss constraint on the generated image and ground truth may cause the image to be blurred.
         # So we adopt the perceptual loss [26] as another constraint.
@@ -117,9 +123,10 @@ for epoch in range(NUM_STEPS):
         loss_full_G.backward()
         optim_G.step()
 
-        real_loss = criterion(D(real), torch.ones_like(D(real)))
-        fake_loss = criterion(D(fake.detach()), torch.zeros_like(D(fake)))
+        real_loss = criterion(D(real), True)
+        fake_loss = criterion(D(fake.detach()), False)
         loss_full_D = (real_loss + fake_loss) / 2
+        
         # optimize D
         optim_D.zero_grad()
         loss_full_D.backward()
@@ -127,28 +134,34 @@ for epoch in range(NUM_STEPS):
 
         # print losses
         if batch_idx % 1 == 0:
+            # pass
             print(
-                f"\rEpoch [{epoch}/{NUM_STEPS}] Batch {batch_idx}/{len(loader)} \
+                f"\rEpoch [{epoch}] ,Step {step}/{len(loader)} \
                   Loss D: {loss_full_D:.4f}, loss G: {loss_full_G:.4f}", end=""
             )
-        if batch_idx % 100 == 0:
+        if batch_idx % 5 == 0:
             with torch.no_grad():
-                fake = G(real, pose)
-                img_grid_real = torchvision.utils.make_grid(real[:4], normalize=True)
-                img_grid_fake = torchvision.utils.make_grid(fake[:4], normalize=True)
+                rand_pose = torch.rand_like(pose)
+                fake_exp, fake = G(x, rand_pose)
+                # # print(fake_[0].shape)
+                img_grid_real = torchvision.utils.make_grid([x[i] for i in range(4)])
+                img_grid_fake_exp = torchvision.utils.make_grid([fake_exp[i] for i in range(4)])
+                img_grid_fake = torchvision.utils.make_grid([fake[i] for i in range(4)])
+                writer_fake_exp.add_image("Fake_Expression", img_grid_fake_exp, global_step=step)
+                writer_fake.add_image("Fake_Rotation", img_grid_fake, global_step=step)
                 writer_real.add_image("Real", img_grid_real, global_step=step)
-                writer_fake.add_image("Fake", img_grid_fake, global_step=step)
-
+                writer_D.add_scalar("Loss", loss_full_D, global_step=step)
+                writer_G.add_scalar("Loss", loss_full_G, global_step=step)
             step += 1
+            # pass
+            # update learning rates
+            lr_scheduler_G.step()
+            lr_scheduler_D.step()
 
-    # update learning rates
-    lr_scheduler_G.step()
-    lr_scheduler_D.step()
-
-    # save models
-    if epoch % 100 == 0:
-        torch.save(G.state_dict(), f"saved_models/G_{epoch}.pth")
-        torch.save(D.state_dict(), f"saved_models/D_{epoch}.pth")
+            # save models
+            if step % 100 == 0:
+                torch.save(G.state_dict(), f"saved_models/G_{step}.pth")
+                torch.save(D.state_dict(), f"saved_models/D_{step}.pth")
 
 # save final model
 torch.save(G.state_dict(), f"saved_models/G_final.pth")

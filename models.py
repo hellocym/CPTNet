@@ -338,10 +338,11 @@ class CPTNet(nn.Module):
         top-down head, left-right head: [-1, 1]
         """
         x = self.EG(x, pose_vector)
+        x_exp = x
         x1 = self.HMGM(x, pose_vector)
         x2 = self.HMGG(x, pose_vector)
         x = self.Comb(x1, x2)
-        return x
+        return x_exp, x
     
 
 class StarGANDiscriminator(nn.Module):
