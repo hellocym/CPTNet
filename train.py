@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from models import StarGANDiscriminator, CPTNet, LossNetwork, initialize_weights
 from dataset import AnimeCeleb, AnimeCelebIter
 from utils import GANLoss
+import os
 
 
 # Hyperparameters etc.
@@ -137,7 +138,9 @@ for epoch in range(NUM_STEPS//BATCH_SIZE):
             # pass
             print(
                 f"\rEpoch [{epoch}] ,Step {step}/{len(loader)} \
-                  Loss D: {loss_full_D:.4f}, loss G: {loss_full_G:.4f}", end=""
+                  Loss D: {loss_full_D:.4f}, Loss G: {loss_full_G:.4f},\
+                  Loss G_adv = {loss_adv:.4f}, Loss G_pair = {loss_pair:.4f}, Loss G_p = {loss_p:.4f}\
+                  ", end=""
             )
         if batch_idx % 5 == 0:
             with torch.no_grad():
@@ -152,6 +155,9 @@ for epoch in range(NUM_STEPS//BATCH_SIZE):
                 writer_real.add_image("Real", img_grid_real, global_step=step)
                 writer_D.add_scalar("Loss", loss_full_D, global_step=step)
                 writer_G.add_scalar("Loss", loss_full_G, global_step=step)
+                writer_G.add_scalar("Loss_adv", loss_adv, global_step=step)
+                writer_G.add_scalar("Loss_pair", loss_pair, global_step=step)
+                writer_G.add_scalar("Loss_p", loss_p, global_step=step)
             step += 1
             # pass
             # update learning rates
@@ -160,6 +166,8 @@ for epoch in range(NUM_STEPS//BATCH_SIZE):
 
             # save models
             if step % 100 == 0:
+                if not os.path.exists('saved_models'):
+                    os.makedirs('saved_models')
                 torch.save(G.state_dict(), f"saved_models/G_{step}.pth")
                 torch.save(D.state_dict(), f"saved_models/D_{step}.pth")
 

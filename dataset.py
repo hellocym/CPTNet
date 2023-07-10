@@ -77,7 +77,7 @@ class AnimeCelebIter(IterableDataset):
             x_png_name = x_['png_name'].iloc[0]
             x_folder_name = x_['folder_name'].iloc[0]
             # print(str(x_folder_name).zfill(5))
-            x_path = os.path.join(self.rot_path, str(x_folder_name).zfill(5), x_png_name)
+            x_path = os.path.join(self.exp_path, str(x_folder_name).zfill(5), x_png_name)
             # print(x_path)
             if not os.path.exists(x_path):
                 continue
